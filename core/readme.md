@@ -146,7 +146,7 @@ scafad-layer1/
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/scafad-layer1.git
+   git clone https://github.com/Pepstee/scafad-layer1.git
    cd scafad-layer1
    ```
 

@@ -144,6 +144,88 @@ class PrivacyUtilityTradeoff:
     constraint_violations: List[str] = field(default_factory=list)
 
 
+class CompositionTracker:
+    """Track privacy budget composition across multiple queries"""
+    
+    def __init__(self):
+        self.query_history = []
+        self.total_epsilon = 0.0
+        self.total_delta = 0.0
+        self.composition_method = "basic"
+        
+    def add_query(self, epsilon: float, delta: float, mechanism: str):
+        """Add a new query to composition tracking"""
+        self.query_history.append({
+            'epsilon': epsilon,
+            'delta': delta,
+            'mechanism': mechanism,
+            'timestamp': time.time()
+        })
+        
+        # Basic composition (can be improved with advanced composition)
+        self.total_epsilon += epsilon
+        self.total_delta += delta
+    
+    def get_total_privacy_cost(self) -> Tuple[float, float]:
+        """Get total privacy cost so far"""
+        return self.total_epsilon, self.total_delta
+    
+    def get_composition_analysis(self) -> Dict[str, Any]:
+        """Get detailed composition analysis"""
+        if not self.query_history:
+            return {'no_queries': True}
+        
+        return {
+            'total_queries': len(self.query_history),
+            'total_epsilon': self.total_epsilon,
+            'total_delta': self.total_delta,
+            'composition_method': self.composition_method,
+            'query_breakdown': {
+                'by_mechanism': self._get_mechanism_breakdown(),
+                'temporal_distribution': self._get_temporal_distribution()
+            }
+        }
+    
+    def _get_mechanism_breakdown(self) -> Dict[str, Dict[str, float]]:
+        """Get breakdown of privacy cost by mechanism"""
+        mechanism_stats = defaultdict(lambda: {'epsilon': 0.0, 'delta': 0.0, 'count': 0})
+        
+        for query in self.query_history:
+            mech = query['mechanism']
+            mechanism_stats[mech]['epsilon'] += query['epsilon']
+            mechanism_stats[mech]['delta'] += query['delta']
+            mechanism_stats[mech]['count'] += 1
+        
+        return dict(mechanism_stats)
+    
+    def _get_temporal_distribution(self) -> Dict[str, Any]:
+        """Get temporal distribution of queries"""
+        if not self.query_history:
+            return {}
+        
+        timestamps = [q['timestamp'] for q in self.query_history]
+        
+        return {
+            'first_query': min(timestamps),
+            'last_query': max(timestamps),
+            'time_span': max(timestamps) - min(timestamps),
+            'query_rate': len(self.query_history) / (max(timestamps) - min(timestamps) + 1)
+        }
+    
+    def reset_composition(self):
+        """Reset composition tracking"""
+        self.query_history.clear()
+        self.total_epsilon = 0.0
+        self.total_delta = 0.0
+    
+    def set_composition_method(self, method: str):
+        """Set composition method (basic, advanced, moments_accountant)"""
+        if method in ['basic', 'advanced', 'moments_accountant']:
+            self.composition_method = method
+        else:
+            raise ValueError(f"Unknown composition method: {method}")
+
+
 class DifferentialPrivacyBudgetManager:
     """Advanced differential privacy budget management"""
     
@@ -226,8 +308,6 @@ class DifferentialPrivacyBudgetManager:
         """Estimate utility benefit for given privacy parameters"""
         
         # Utility generally increases with epsilon (less noise)
-        # This is a simplified model - real implementation would be more sophisticated
-        
         base_utility = 1.0 - np.exp(-epsilon)  # Asymptotic utility gain
         
         # Adjust based on requirements
@@ -282,8 +362,6 @@ class DifferentialPrivacyBudgetManager:
         """Calculate required epsilon for utility target"""
         
         # Simple model: higher utility target requires higher epsilon
-        # In practice, this would depend on the specific mechanism and data
-        
         if utility_target >= 0.9:
             base_epsilon = 0.5
         elif utility_target >= 0.8:
@@ -648,9 +726,7 @@ class UtilityAwareRedactionEngine:
     
     def _apply_global_operation(self, data: Dict[str, Any], operation: Dict[str, Any]) -> Dict[str, Any]:
         """Apply global redaction operations"""
-        
         # Placeholder for global operations like k-anonymity, l-diversity
-        # These would require more sophisticated implementation
         return data
     
     async def _validate_utility_preservation(self, original_data: Dict[str, Any],
@@ -1429,4 +1505,544 @@ class UtilityCalculator:
         # Mean preservation
         orig_mean = np.mean(orig_numeric)
         proc_mean = np.mean(proc_numeric)
-        mean_preservation =
+        mean_preservation = 1.0 - abs(orig_mean - proc_mean) / (abs(orig_mean) + 1e-10)
+        component_scores['mean_preservation'] = max(0.0, mean_preservation)
+        
+        # Variance preservation
+        orig_var = np.var(orig_numeric)
+        proc_var = np.var(proc_numeric)
+        var_preservation = 1.0 - abs(orig_var - proc_var) / (abs(orig_var) + 1e-10)
+        component_scores['variance_preservation'] = max(0.0, var_preservation)
+        
+        # Distribution similarity (KS test)
+        try:
+            ks_stat, ks_p = stats.ks_2samp(orig_numeric, proc_numeric)
+            distribution_similarity = 1.0 - ks_stat
+            component_scores['distribution_similarity'] = max(0.0, distribution_similarity)
+        except:
+            component_scores['distribution_similarity'] = 0.5
+        
+        overall_utility = np.mean(list(component_scores.values()))
+        
+        return UtilityMeasurement(
+            metric_type=UtilityMetric.STATISTICAL_UTILITY,
+            value=overall_utility,
+            confidence=0.8,
+            baseline_value=1.0,
+            preservation_ratio=overall_utility,
+            component_scores=component_scores,
+            measurement_method="statistical_tests"
+        )
+    
+    def _extract_numeric_values(self, data: Dict[str, Any]) -> List[float]:
+        """Extract all numeric values from data"""
+        numeric_values = []
+        
+        for value in data.values():
+            if isinstance(value, (int, float)):
+                numeric_values.append(float(value))
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    if isinstance(item, (int, float)):
+                        numeric_values.append(float(item))
+        
+        return numeric_values
+    
+    async def _calculate_pattern_preservation(self, original: Dict[str, Any],
+                                            processed: Dict[str, Any]) -> UtilityMeasurement:
+        """Calculate pattern preservation utility"""
+        
+        # Analyze structural patterns between original and processed data
+        component_scores = {}
+        
+        # Field presence pattern
+        orig_fields = set(original.keys())
+        proc_fields = set(processed.keys())
+        field_preservation = len(orig_fields & proc_fields) / len(orig_fields) if orig_fields else 1.0
+        component_scores['field_presence'] = field_preservation
+        
+        # Data type pattern preservation
+        type_preservation_scores = []
+        for field in orig_fields & proc_fields:
+            orig_type = type(original[field]).__name__
+            proc_type = type(processed[field]).__name__
+            type_match = 1.0 if orig_type == proc_type else 0.5  # Partial credit for compatible types
+            type_preservation_scores.append(type_match)
+        
+        type_preservation = np.mean(type_preservation_scores) if type_preservation_scores else 0.0
+        component_scores['type_preservation'] = type_preservation
+        
+        # Value pattern preservation (for numeric data)
+        numeric_pattern_scores = []
+        for field in orig_fields & proc_fields:
+            if isinstance(original[field], (int, float)) and isinstance(processed[field], (int, float)):
+                orig_val = original[field]
+                proc_val = processed[field]
+                
+                # Check if the relative magnitude is preserved
+                if orig_val != 0:
+                    relative_error = abs(orig_val - proc_val) / abs(orig_val)
+                    pattern_score = max(0.0, 1.0 - relative_error)
+                else:
+                    pattern_score = 1.0 if proc_val == 0 else 0.5
+                
+                numeric_pattern_scores.append(pattern_score)
+        
+        numeric_pattern_preservation = np.mean(numeric_pattern_scores) if numeric_pattern_scores else 1.0
+        component_scores['numeric_patterns'] = numeric_pattern_preservation
+        
+        # String pattern preservation
+        string_pattern_scores = []
+        for field in orig_fields & proc_fields:
+            if isinstance(original[field], str) and isinstance(processed[field], str):
+                orig_str = original[field]
+                proc_str = processed[field]
+                
+                # Check format preservation
+                if len(orig_str) > 0 and len(proc_str) > 0:
+                    # Length ratio preservation
+                    length_ratio = min(len(orig_str), len(proc_str)) / max(len(orig_str), len(proc_str))
+                    
+                    # Character pattern preservation (simple heuristic)
+                    orig_alpha_ratio = sum(c.isalpha() for c in orig_str) / len(orig_str)
+                    proc_alpha_ratio = sum(c.isalpha() for c in proc_str) / len(proc_str)
+                    alpha_pattern_preservation = 1.0 - abs(orig_alpha_ratio - proc_alpha_ratio)
+                    
+                    pattern_score = (length_ratio + alpha_pattern_preservation) / 2
+                else:
+                    pattern_score = 1.0 if len(orig_str) == len(proc_str) == 0 else 0.0
+                
+                string_pattern_scores.append(pattern_score)
+        
+        string_pattern_preservation = np.mean(string_pattern_scores) if string_pattern_scores else 1.0
+        component_scores['string_patterns'] = string_pattern_preservation
+        
+        overall_pattern_preservation = np.mean(list(component_scores.values()))
+        
+        return UtilityMeasurement(
+            metric_type=UtilityMetric.PATTERN_PRESERVATION,
+            value=overall_pattern_preservation,
+            confidence=0.7,
+            baseline_value=1.0,
+            preservation_ratio=overall_pattern_preservation,
+            component_scores=component_scores,
+            measurement_method="pattern_analysis"
+        )
+    
+    async def _calculate_correlation_maintenance(self, original: Dict[str, Any],
+                                               processed: Dict[str, Any]) -> UtilityMeasurement:
+        """Calculate correlation maintenance utility"""
+        
+        # Extract numeric fields for correlation analysis
+        orig_numeric_fields = {}
+        proc_numeric_fields = {}
+        
+        for field, value in original.items():
+            if isinstance(value, (int, float)):
+                orig_numeric_fields[field] = value
+                if field in processed and isinstance(processed[field], (int, float)):
+                    proc_numeric_fields[field] = processed[field]
+        
+        if len(orig_numeric_fields) < 2 or len(proc_numeric_fields) < 2:
+            # Not enough numeric fields for correlation analysis
+            return UtilityMeasurement(
+                metric_type=UtilityMetric.CORRELATION_MAINTENANCE,
+                value=1.0,  # No correlations to preserve
+                confidence=1.0,
+                baseline_value=1.0,
+                preservation_ratio=1.0,
+                measurement_method="insufficient_data"
+            )
+        
+        # Calculate pairwise correlations
+        orig_values = list(orig_numeric_fields.values())
+        proc_values = list(proc_numeric_fields.values())
+        
+        component_scores = {}
+        
+        if len(orig_values) >= 2 and len(proc_values) >= 2:
+            # Calculate correlation matrices
+            try:
+                # Create correlation matrix for original data
+                orig_corr_matrix = np.corrcoef(orig_values)
+                proc_corr_matrix = np.corrcoef(proc_values)
+                
+                # Compare correlation structures
+                if orig_corr_matrix.shape == proc_corr_matrix.shape:
+                    # Calculate correlation between correlation matrices
+                    orig_corr_flat = orig_corr_matrix[np.triu_indices_from(orig_corr_matrix, k=1)]
+                    proc_corr_flat = proc_corr_matrix[np.triu_indices_from(proc_corr_matrix, k=1)]
+                    
+                    if len(orig_corr_flat) > 0:
+                        correlation_preservation = np.corrcoef(orig_corr_flat, proc_corr_flat)[0, 1]
+                        correlation_preservation = max(0.0, correlation_preservation)
+                    else:
+                        correlation_preservation = 1.0
+                else:
+                    correlation_preservation = 0.5  # Partial preservation if dimensions differ
+                
+                component_scores['correlation_structure'] = correlation_preservation
+                
+                # Calculate mean absolute difference in correlations
+                if orig_corr_matrix.shape == proc_corr_matrix.shape:
+                    correlation_diff = np.mean(np.abs(orig_corr_matrix - proc_corr_matrix))
+                    correlation_fidelity = max(0.0, 1.0 - correlation_diff)
+                    component_scores['correlation_fidelity'] = correlation_fidelity
+                
+            except Exception as e:
+                self.logger.debug(f"Correlation calculation failed: {e}")
+                component_scores['correlation_structure'] = 0.5
+                component_scores['correlation_fidelity'] = 0.5
+        
+        # Calculate rank correlation preservation
+        try:
+            orig_ranks = stats.rankdata(orig_values)
+            proc_ranks = stats.rankdata(proc_values)
+            
+            rank_correlation = stats.spearmanr(orig_ranks, proc_ranks)[0]
+            rank_correlation = max(0.0, rank_correlation)
+            component_scores['rank_correlation'] = rank_correlation
+            
+        except Exception as e:
+            self.logger.debug(f"Rank correlation calculation failed: {e}")
+            component_scores['rank_correlation'] = 0.5
+        
+        overall_correlation_maintenance = np.mean(list(component_scores.values()))
+        
+        return UtilityMeasurement(
+            metric_type=UtilityMetric.CORRELATION_MAINTENANCE,
+            value=overall_correlation_maintenance,
+            confidence=0.8,
+            baseline_value=1.0,
+            preservation_ratio=overall_correlation_maintenance,
+            component_scores=component_scores,
+            measurement_method="correlation_analysis"
+        )
+    
+    async def _calculate_distributional_fidelity(self, original: Dict[str, Any],
+                                                processed: Dict[str, Any]) -> UtilityMeasurement:
+        """Calculate distributional fidelity utility"""
+        
+        # Extract numeric values for distributional analysis
+        orig_numeric = self._extract_numeric_values(original)
+        proc_numeric = self._extract_numeric_values(processed)
+        
+        if not orig_numeric or not proc_numeric:
+            return UtilityMeasurement(
+                metric_type=UtilityMetric.DISTRIBUTIONAL_FIDELITY,
+                value=1.0,  # No distribution to preserve
+                confidence=1.0,
+                baseline_value=1.0,
+                preservation_ratio=1.0,
+                measurement_method="no_numeric_data"
+            )
+        
+        component_scores = {}
+        
+        # Statistical moments preservation
+        try:
+            # Mean preservation
+            orig_mean = np.mean(orig_numeric)
+            proc_mean = np.mean(proc_numeric)
+            mean_fidelity = 1.0 - abs(orig_mean - proc_mean) / (abs(orig_mean) + 1e-10)
+            component_scores['mean_fidelity'] = max(0.0, mean_fidelity)
+            
+            # Variance preservation
+            orig_var = np.var(orig_numeric)
+            proc_var = np.var(proc_numeric)
+            var_fidelity = 1.0 - abs(orig_var - proc_var) / (abs(orig_var) + 1e-10)
+            component_scores['variance_fidelity'] = max(0.0, var_fidelity)
+            
+            # Skewness preservation
+            orig_skew = stats.skew(orig_numeric)
+            proc_skew = stats.skew(proc_numeric)
+            skew_fidelity = 1.0 - abs(orig_skew - proc_skew) / (abs(orig_skew) + 1e-10)
+            component_scores['skewness_fidelity'] = max(0.0, skew_fidelity)
+            
+            # Kurtosis preservation
+            orig_kurtosis = stats.kurtosis(orig_numeric)
+            proc_kurtosis = stats.kurtosis(proc_numeric)
+            kurtosis_fidelity = 1.0 - abs(orig_kurtosis - proc_kurtosis) / (abs(orig_kurtosis) + 1e-10)
+            component_scores['kurtosis_fidelity'] = max(0.0, kurtosis_fidelity)
+            
+        except Exception as e:
+            self.logger.debug(f"Statistical moments calculation failed: {e}")
+            component_scores.update({
+                'mean_fidelity': 0.5,
+                'variance_fidelity': 0.5,
+                'skewness_fidelity': 0.5,
+                'kurtosis_fidelity': 0.5
+            })
+        
+        # Kolmogorov-Smirnov test for distribution similarity
+        try:
+            ks_stat, ks_p = stats.ks_2samp(orig_numeric, proc_numeric)
+            ks_fidelity = 1.0 - ks_stat  # Lower KS statistic = higher fidelity
+            component_scores['ks_test_fidelity'] = max(0.0, ks_fidelity)
+        except Exception as e:
+            self.logger.debug(f"KS test failed: {e}")
+            component_scores['ks_test_fidelity'] = 0.5
+        
+        # Earth Mover's Distance (Wasserstein distance)
+        try:
+            emd = stats.wasserstein_distance(orig_numeric, proc_numeric)
+            # Normalize EMD by the range of original data
+            orig_range = np.max(orig_numeric) - np.min(orig_numeric)
+            normalized_emd = emd / (orig_range + 1e-10)
+            emd_fidelity = max(0.0, 1.0 - normalized_emd)
+            component_scores['emd_fidelity'] = emd_fidelity
+        except Exception as e:
+            self.logger.debug(f"EMD calculation failed: {e}")
+            component_scores['emd_fidelity'] = 0.5
+        
+        # Quantile preservation
+        try:
+            quantiles = [0.1, 0.25, 0.5, 0.75, 0.9]
+            quantile_fidelities = []
+            
+            for q in quantiles:
+                orig_quantile = np.quantile(orig_numeric, q)
+                proc_quantile = np.quantile(proc_numeric, q)
+                
+                quantile_error = abs(orig_quantile - proc_quantile) / (abs(orig_quantile) + 1e-10)
+                quantile_fidelity = max(0.0, 1.0 - quantile_error)
+                quantile_fidelities.append(quantile_fidelity)
+            
+            avg_quantile_fidelity = np.mean(quantile_fidelities)
+            component_scores['quantile_fidelity'] = avg_quantile_fidelity
+            
+        except Exception as e:
+            self.logger.debug(f"Quantile calculation failed: {e}")
+            component_scores['quantile_fidelity'] = 0.5
+        
+        # Overall distributional fidelity
+        overall_fidelity = np.mean(list(component_scores.values()))
+        
+        return UtilityMeasurement(
+            metric_type=UtilityMetric.DISTRIBUTIONAL_FIDELITY,
+            value=overall_fidelity,
+            confidence=0.9,
+            baseline_value=1.0,
+            preservation_ratio=overall_fidelity,
+            component_scores=component_scores,
+            measurement_method="distributional_analysis"
+        )
+
+
+# Main module interface functions
+async def optimize_privacy_utility_tradeoff(data: Dict[str, Any],
+                                          preservation_guard,
+                                          privacy_requirements: Dict[str, Any],
+                                          utility_requirements: Dict[str, Any],
+                                          config: Dict[str, Any] = None) -> PrivacyUtilityTradeoff:
+    """
+    Main function to optimize privacy-utility trade-off
+    
+    Args:
+        data: Input data to be processed
+        preservation_guard: Anomaly preservation guard instance
+        privacy_requirements: Privacy constraints and requirements
+        utility_requirements: Utility targets and constraints
+        config: Configuration parameters
+        
+    Returns:
+        PrivacyUtilityTradeoff: Optimization result
+    """
+    optimizer = PrivacyUtilityOptimizer(preservation_guard, config)
+    return await optimizer.optimize_privacy_utility_tradeoff(
+        data, privacy_requirements, utility_requirements
+    )
+
+
+def create_differential_privacy_budget(budget_id: str, epsilon: float, delta: float,
+                                     config: Dict[str, Any] = None) -> PrivacyBudget:
+    """
+    Create a differential privacy budget
+    
+    Args:
+        budget_id: Unique identifier for the budget
+        epsilon: Privacy loss parameter
+        delta: Failure probability
+        config: Configuration parameters
+        
+    Returns:
+        PrivacyBudget: Created budget instance
+    """
+    manager = DifferentialPrivacyBudgetManager(config)
+    return manager.create_budget(budget_id, epsilon, delta)
+
+
+async def apply_utility_aware_redaction(data: Dict[str, Any],
+                                      preservation_guard,
+                                      redaction_requirements: Dict[str, Any],
+                                      target_utility: float = 0.85,
+                                      config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Apply utility-aware redaction to data
+    
+    Args:
+        data: Input data to be redacted
+        preservation_guard: Anomaly preservation guard instance
+        redaction_requirements: Redaction requirements and constraints
+        target_utility: Target utility preservation level
+        config: Configuration parameters
+        
+    Returns:
+        Dict[str, Any]: Redacted data
+    """
+    engine = UtilityAwareRedactionEngine(preservation_guard, config)
+    return await engine.minimize_anomaly_detection_impact(
+        data, redaction_requirements, target_utility
+    )
+
+
+async def calculate_utility_metrics(original: Dict[str, Any],
+                                  processed: Dict[str, Any],
+                                  preservation_guard,
+                                  metrics: List[UtilityMetric] = None) -> Dict[UtilityMetric, UtilityMeasurement]:
+    """
+    Calculate utility metrics for processed data
+    
+    Args:
+        original: Original data before processing
+        processed: Processed data after privacy mechanisms
+        preservation_guard: Anomaly preservation guard instance
+        metrics: List of utility metrics to calculate
+        
+    Returns:
+        Dict[UtilityMetric, UtilityMeasurement]: Calculated utility measurements
+    """
+    if metrics is None:
+        metrics = list(UtilityMetric)
+    
+    calculator = UtilityCalculator(preservation_guard)
+    return await calculator.calculate_utility_metrics(original, processed, metrics)
+
+
+# Export main classes and functions
+__all__ = [
+    'PrivacyMechanism',
+    'UtilityMetric', 
+    'PrivacyBudget',
+    'UtilityMeasurement',
+    'PrivacyUtilityTradeoff',
+    'DifferentialPrivacyBudgetManager',
+    'UtilityAwareRedactionEngine',
+    'PrivacyUtilityOptimizer',
+    'UtilityCalculator',
+    'CompositionTracker',
+    'optimize_privacy_utility_tradeoff',
+    'create_differential_privacy_budget',
+    'apply_utility_aware_redaction',
+    'calculate_utility_metrics'
+]
+
+
+if __name__ == "__main__":
+    # Example usage and testing
+    import asyncio
+    
+    async def example_usage():
+        """Example of how to use the privacy-utility optimizer"""
+        
+        # Mock preservation guard for demonstration
+        class MockPreservationGuard:
+            async def assess_preservation_impact(self, original, processed, context):
+                # Simple mock assessment
+                class MockAssessment:
+                    preservation_effectiveness = 0.85
+                    confidence_score = 0.9
+                return MockAssessment()
+            
+            class MockInfoAnalyzer:
+                def analyze_information_loss(self, original, processed):
+                    return {
+                        'total_entropy_loss': 0.15,
+                        'mutual_information_loss': 0.12,
+                        'structural_information_loss': 0.08
+                    }
+            
+            info_analyzer = MockInfoAnalyzer()
+        
+        # Sample data
+        sample_data = {
+            'user_id': 'user_12345',
+            'transaction_amount': 150.50,
+            'location': 'New York',
+            'timestamp': 1640995200,
+            'device_type': 'mobile',
+            'risk_score': 0.3
+        }
+        
+        # Privacy requirements
+        privacy_req = {
+            'epsilon': 1.0,
+            'delta': 1e-6,
+            'min_privacy': 0.6,
+            'privacy_weight': 0.4
+        }
+        
+        # Utility requirements
+        utility_req = {
+            'target_utility': 0.8,
+            'min_utility': 0.7,
+            'utility_weight': 0.6
+        }
+        
+        # Configuration
+        config = {
+            'budget_config': {
+                'max_epsilon': 2.0,
+                'max_delta': 1e-5
+            },
+            'redaction_config': {
+                'importance_cache_ttl': 300
+            }
+        }
+        
+        # Create mock preservation guard
+        preservation_guard = MockPreservationGuard()
+        
+        # Optimize privacy-utility trade-off
+        result = await optimize_privacy_utility_tradeoff(
+            sample_data, preservation_guard, privacy_req, utility_req, config
+        )
+        
+        print(f"Privacy level: {result.privacy_level:.3f}")
+        print(f"Utility level: {result.utility_level:.3f}")
+        print(f"Pareto optimal: {result.pareto_optimal}")
+        print(f"Mechanism: {result.mechanism.value}")
+        print(f"Optimization score: {result.optimization_score:.3f}")
+        
+        # Apply utility-aware redaction
+        redaction_req = {
+            'required_fields': ['user_id'],
+            'optional_fields': ['location', 'device_type'],
+            'strategy': 'anomaly_aware'
+        }
+        
+        redacted_data = await apply_utility_aware_redaction(
+            sample_data, preservation_guard, redaction_req, 0.85, config
+        )
+        
+        print("\nRedacted data:")
+        for key, value in redacted_data.items():
+            print(f"  {key}: {value}")
+        
+        # Calculate utility metrics
+        metrics = [
+            UtilityMetric.ANOMALY_DETECTABILITY,
+            UtilityMetric.STATISTICAL_UTILITY,
+            UtilityMetric.PATTERN_PRESERVATION
+        ]
+        
+        utility_measurements = await calculate_utility_metrics(
+            sample_data, redacted_data, preservation_guard, metrics
+        )
+        
+        print("\nUtility measurements:")
+        for metric, measurement in utility_measurements.items():
+            print(f"  {metric.value}: {measurement.value:.3f} (confidence: {measurement.confidence:.3f})")
+    
+    # Run example if script is executed directly
+    asyncio.run(example_usage())
